@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Check global internet infrastructure
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee global-report.txt
           import urllib.request
           import socket
           import datetime
@@ -102,3 +102,10 @@ jobs:
 
           print("\nGLOBAL CHECK FINISHED")
           PY
+
+      - name: Save global network report
+        uses: actions/upload-artifact@v4
+        with:
+          name: global-report
+          path: global-report.txt
+          retention-days: 7
