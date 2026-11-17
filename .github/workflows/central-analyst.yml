@@ -124,7 +124,7 @@ jobs:
                   for line in report.splitlines():
                       print(line)
 
-                                            upper = line.upper()
+                      upper = line.upper()
 
                       if "HTTP ERROR 403" in upper or "HTTP 403" in upper:
                           info_events.append((workflow, line))
