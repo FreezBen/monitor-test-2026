@@ -1,0 +1,84 @@
+
+name: Gaming Infrastructure Monitor
+
+on:
+  schedule:
+    - cron: "5,15,25,35,45,55 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gaming-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check gaming infrastructure
+        run: |
+          python - <<'PY'
+          import urllib.request
+          import urllib.parse
+          import json
+          import datetime
+
+          print("GAMING INFRASTRUCTURE MONITOR")
+          print("Time UTC:", datetime.datetime.now(datetime.timezone.utc))
+          print("=" * 60)
+
+          websites = {
+              "Steam Store": "https://store.steampowered.com/",
+              "Steam Community": "https://steamcommunity.com/",
+              "Steam Web API": "https://api.steampowered.com/ISteamWebAPIUtil/GetSupportedAPIList/v1/",
+              "Dota 2": "https://www.dota2.com/",
+              "Counter-Strike 2": "https://www.counter-strike.net/",
+              "Steam CDN": "https://cdn.cloudflare.steamstatic.com/",
+          }
+
+          print("\n--- GAMING SERVICES ---")
+
+          for name, url in websites.items():
+              try:
+                  req = urllib.request.Request(
+                      url,
+                      headers={"User-Agent": "GamingMonitor/1.0"}
+                  )
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      print(f"OK | {name} | HTTP {response.status}")
+              except Exception as error:
+                  print(f"WARNING | {name} | {error}")
+
+          print("\n--- STEAM NETWORK STATUS ---")
+
+          try:
+              url = "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/"
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "GamingMonitor/1.0"}
+              )
+              with urllib.request.urlopen(req, timeout=15) as response:
+                  data = json.loads(response.read().decode())
+                  print("OK | Steam Server Info API |", data)
+          except Exception as error:
+              print("WARNING | Steam Server Info API |", error)
+
+          print("\n--- STEAM STATUS DATA ---")
+
+          try:
+              url = "https://api.steampowered.com/ISteamWebAPIUtil/GetSupportedAPIList/v1/"
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "GamingMonitor/1.0"}
+              )
+              with urllib.request.urlopen(req, timeout=15) as response:
+                  print("OK | Steam API | HTTP", response.status)
+          except Exception as error:
+              print("WARNING | Steam API |", error)
+
+          print("\n--- DOTA 2 COORDINATOR ---")
+          print("INFO | Public endpoint for live coordinator health is not reliably available without a Steam client.")
+
+          print("\n--- CS2 MATCHMAKING ---")
+          print("INFO | Matchmaking health requires dedicated game-client or regional probes.")
+
+          print("\nGAMING CHECK FINISHED")
+          PY
