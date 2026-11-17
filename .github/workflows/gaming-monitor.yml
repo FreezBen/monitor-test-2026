@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Check gaming infrastructure
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee gaming-report.txt
           import urllib.request
           import urllib.parse
           import json
@@ -82,3 +82,10 @@ jobs:
 
           print("\nGAMING CHECK FINISHED")
           PY
+
+      - name: Save gaming monitoring report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gaming-report
+          path: gaming-report.txt
+          retention-days: 7
