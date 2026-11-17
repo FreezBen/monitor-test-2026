@@ -1,0 +1,98 @@
+
+name: Central Infrastructure Analyst
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "9,19,29,39,49,59 * * * *"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download available monitoring reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+          import datetime
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+
+          url = f"https://api.github.com/repos/{repo}/actions/runs?per_page=30"
+
+          req = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28"
+              }
+          )
+
+          print("CENTRAL INFRASTRUCTURE ANALYST")
+          print("Time UTC:", datetime.datetime.now(datetime.timezone.utc))
+          print("=" * 60)
+
+          try:
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  data = json.loads(response.read().decode())
+
+              runs = data.get("workflow_runs", [])
+
+              targets = [
+                  "Critical Infrastructure Monitor",
+                  "Europe and Poland Monitor",
+                  "Global Network Monitor",
+                  "Gaming Infrastructure Monitor"
+              ]
+
+              found = {}
+
+              for run in runs:
+                  name = run.get("name", "Unknown")
+                  if name in targets and name not in found:
+                      found[name] = run
+
+              alerts = []
+
+              for name in targets:
+                  run = found.get(name)
+
+                  if not run:
+                      print(f"UNKNOWN | {name} | No recorded run")
+                      alerts.append("UNKNOWN")
+                      continue
+
+                  status = run.get("conclusion") or run.get("status")
+                  created = run.get("created_at")
+
+                  print(f"{status} | {name} | {created}")
+
+                  if status not in ("success",):
+                      alerts.append("WARNING")
+
+              print("=" * 60)
+
+              if "WARNING" in alerts:
+                  print("ALERT LEVEL: YELLOW")
+              elif "UNKNOWN" in alerts:
+                  print("ALERT LEVEL: UNKNOWN")
+              else:
+                  print("ALERT LEVEL: GREEN")
+
+              print("NOTE: Workflow success does not prove every monitored service is healthy.")
+              print("Central analysis finished.")
+
+          except Exception as error:
+              print("ANALYST ERROR:", error)
+              raise
+          PY
