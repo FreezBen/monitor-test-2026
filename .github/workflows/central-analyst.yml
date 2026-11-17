@@ -92,11 +92,22 @@ jobs:
                   missing.append(workflow)
                   continue
 
+              
               download_url = artifact["archive_download_url"]
+
+              class SafeRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+                      return urllib.request.Request(
+                          newurl,
+                          headers={"User-Agent": "Infrastructure-Monitor"}
+                      )
+
+              opener = urllib.request.build_opener(SafeRedirect())
               req = urllib.request.Request(download_url, headers=headers)
 
-              with urllib.request.urlopen(req, timeout=60) as r:
+              with opener.open(req, timeout=60) as r:
                   archive = zipfile.ZipFile(io.BytesIO(r.read()))
+
 
               for filename in archive.namelist():
                   if not filename.endswith(".txt"):
