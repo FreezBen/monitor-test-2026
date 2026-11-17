@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Check European infrastructure
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee europe-report.txt
           import urllib.request
           import datetime
 
@@ -47,3 +47,10 @@ jobs:
               except Exception as error:
                   print(f"WARNING | {name} | {error}")
           PY
+          
+      - name: Save Europe monitoring report
+        uses: actions/upload-artifact@v4
+        with:
+          name: europe-report
+          path: europe-report.txt
+          retention-days: 7
