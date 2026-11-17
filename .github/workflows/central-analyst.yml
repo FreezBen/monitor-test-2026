@@ -1,4 +1,3 @@
-
 name: Central Infrastructure Analyst
 
 on:
@@ -14,85 +13,122 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     steps:
-      - name: Download available monitoring reports
+      - name: Collect and analyze reports
         env:
           GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           python - <<'PY'
           import os
           import json
           import urllib.request
+          import zipfile
+          import io
           import datetime
 
           token = os.environ["GH_TOKEN"]
-          repo = os.environ["GITHUB_REPOSITORY"]
+          repo = os.environ["REPOSITORY"]
+          base = f"https://api.github.com/repos/{repo}"
 
-          url = f"https://api.github.com/repos/{repo}/actions/runs?per_page=30"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28"
+          }
 
-          req = urllib.request.Request(
-              url,
-              headers={
-                  "Authorization": f"Bearer {token}",
-                  "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28"
-              }
-          )
+          targets = {
+              "Critical Infrastructure Monitor": "monitor-report",
+              "Europe and Poland Monitor": "europe-report",
+              "Global Network Monitor": "global-report",
+              "Gaming Infrastructure Monitor": "gaming-report"
+          }
+
+          problems = []
+          missing = []
+
+          def get_json(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.loads(r.read().decode())
 
           print("CENTRAL INFRASTRUCTURE ANALYST")
-          print("Time UTC:", datetime.datetime.now(datetime.timezone.utc))
+          print("UTC:", datetime.datetime.now(datetime.timezone.utc))
           print("=" * 60)
 
-          try:
-              with urllib.request.urlopen(req, timeout=20) as response:
-                  data = json.loads(response.read().decode())
+          runs_data = get_json(base + "/actions/runs?per_page=100")
+          runs = runs_data.get("workflow_runs", [])
 
-              runs = data.get("workflow_runs", [])
+          for workflow, artifact_name in targets.items():
+              print("\nMODULE:", workflow)
 
-              targets = [
-                  "Critical Infrastructure Monitor",
-                  "Europe and Poland Monitor",
-                  "Global Network Monitor",
-                  "Gaming Infrastructure Monitor"
+              matching = [
+                  r for r in runs
+                  if r.get("name") == workflow
+                  and r.get("status") == "completed"
               ]
 
-              found = {}
+              if not matching:
+                  print("UNKNOWN: No completed run found")
+                  missing.append(workflow)
+                  continue
 
-              for run in runs:
-                  name = run.get("name", "Unknown")
-                  if name in targets and name not in found:
-                      found[name] = run
+              run = matching[0]
+              print("Run:", run["id"])
+              print("Conclusion:", run.get("conclusion"))
 
-              alerts = []
+              artifacts_data = get_json(
+                  base + f"/actions/runs/{run['id']}/artifacts"
+              )
 
-              for name in targets:
-                  run = found.get(name)
+              artifact = next(
+                  (a for a in artifacts_data.get("artifacts", [])
+                   if a.get("name") == artifact_name
+                   and not a.get("expired")),
+                  None
+              )
 
-                  if not run:
-                      print(f"UNKNOWN | {name} | No recorded run")
-                      alerts.append("UNKNOWN")
+              if not artifact:
+                  print("UNKNOWN: Report artifact not found")
+                  missing.append(workflow)
+                  continue
+
+              download_url = artifact["archive_download_url"]
+              req = urllib.request.Request(download_url, headers=headers)
+
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  archive = zipfile.ZipFile(io.BytesIO(r.read()))
+
+              for filename in archive.namelist():
+                  if not filename.endswith(".txt"):
                       continue
 
-                  status = run.get("conclusion") or run.get("status")
-                  created = run.get("created_at")
+                  report = archive.read(filename).decode(
+                      "utf-8", errors="replace"
+                  )
 
-                  print(f"{status} | {name} | {created}")
+                  print("--- REPORT:", filename, "---")
+                  for line in report.splitlines():
+                      print(line)
 
-                  if status not in ("success",):
-                      alerts.append("WARNING")
+                      upper = line.upper()
+                      if any(word in upper for word in
+                             ["WARNING", "ERROR", "TIMEOUT", "FAILED"]):
+                          problems.append((workflow, line))
 
-              print("=" * 60)
+          print("\n" + "=" * 60)
+          print("CENTRAL ASSESSMENT")
 
-              if "WARNING" in alerts:
-                  print("ALERT LEVEL: YELLOW")
-              elif "UNKNOWN" in alerts:
-                  print("ALERT LEVEL: UNKNOWN")
-              else:
-                  print("ALERT LEVEL: GREEN")
+          if missing:
+              print("ALERT LEVEL: UNKNOWN")
+              print("Missing reports:", len(missing))
+          elif problems:
+              print("ALERT LEVEL: YELLOW")
+              print("Potential problems:", len(problems))
+          else:
+              print("ALERT LEVEL: GREEN")
+              print("No explicit errors found in reports.")
 
-              print("NOTE: Workflow success does not prove every monitored service is healthy.")
-              print("Central analysis finished.")
-
-          except Exception as error:
-              print("ANALYST ERROR:", error)
-              raise
+          print("NOTE: HTTP 403 alone does not prove an outage.")
+          print("A successful website response does not prove the")
+          print("underlying service is fully operational.")
           PY
