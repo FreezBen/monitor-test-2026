@@ -7,7 +7,7 @@ on:
 
 permissions:
   actions: read
-  contents: weite
+  contents: write
 
 jobs:
   collect:
@@ -190,5 +190,24 @@ jobs:
           print("\nNOTE: HTTP 403 is not treated as an outage.")
           print("A successful HTTP response does not guarantee")
           print("that the underlying service is fully operational.")
+
+          # SAVE ANALYSIS HISTORY
+          os.makedirs("reports", exist_ok=True)
+
+          history_record = {
+              "timestamp": datetime.datetime.now(
+                  datetime.timezone.utc
+              ).isoformat(),
+              "server_errors": len(server_errors),
+              "retry_errors": len(retry_errors),
+              "access_restrictions": len(info_events),
+              "missing_reports": len(missing),
+              "affected_modules": affected_modules
+          }
+
+          with open("reports/history.jsonl", "a", encoding="utf-8") as history:
+              history.write(json.dumps(history_record) + "\n")
+
+          print("HISTORY: New analysis record saved.")
 
           PY
