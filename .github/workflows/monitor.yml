@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Check critical services
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee report.txt
           import urllib.request
           import datetime
 
