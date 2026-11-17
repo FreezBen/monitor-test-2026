@@ -207,18 +207,46 @@ jobs:
 
           with open("reports/history.jsonl", "a", encoding="utf-8") as history:
               history.write(json.dumps(history_record) + "\n")
+   # ANALYZE HISTORICAL TRENDS
+       history_path = "reports/history.jsonl"
 
-          print("HISTORY: New analysis record saved.")
+      if os.path.exists(history_path):
+       with open(history_path, "r", encoding="utf-8") as history:
+         records = [
+            json.loads(line)
+            for line in history
+            if line.strip()
+        ]
 
-          PY
-      - name: Commit analysis history
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add reports/history.jsonl
-          if git diff --cached --quiet; then
-            echo "No history changes to commit"
-          else
-            git commit -m "Update infrastructure monitoring history"
-            git push
-          fi
+        previous = records[-1] if records else None
+
+        print("\n" + "=" * 60)
+        print("HISTORICAL TREND ANALYSIS")
+
+    if previous:
+        print("Previous server errors:", previous["server_errors"])
+        print("Current server errors:", len(server_errors))
+
+    if len(server_errors) > previous["server_errors"]:
+            print("TREND: DETERIORATING")
+        elif len(server_errors) < previous["server_errors"]:
+            print("TREND: IMPROVING")
+        else:
+            print("TREND: STABLE")
+    else:
+       print("Not enough historical data.")    
+    print("HISTORY: New analysis record saved.")
+     
+  
+      PY 
+    - name: Commit analysis history
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add reports/history.jsonl
+        if git diff --cached --quiet; then
+         echo "No history changes to commit"
+        else
+         git commit -m "Update infrastructure monitoring history"
+         git push
+        fi
