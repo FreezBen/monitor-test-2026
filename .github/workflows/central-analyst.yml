@@ -7,12 +7,16 @@ on:
 
 permissions:
   actions: read
-  contents: read
+  contents: weite
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
       - name: Collect and analyze reports
         env:
           GH_TOKEN: ${{ github.token }}
