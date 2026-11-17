@@ -45,6 +45,9 @@ jobs:
 
           problems = []
           missing = []
+          server_errors = []
+          retry_errors = []
+          info_events = []
 
           def get_json(url):
               req = urllib.request.Request(url, headers=headers)
@@ -121,25 +124,67 @@ jobs:
                   for line in report.splitlines():
                       print(line)
 
-                      upper = line.upper()
-                      if any(word in upper for word in
-                             ["WARNING", "ERROR", "TIMEOUT", "FAILED"]):
-                          problems.append((workflow, line))
+                                            upper = line.upper()
 
+                      if "HTTP ERROR 403" in upper or "HTTP 403" in upper:
+                          info_events.append((workflow, line))
+
+                      elif any(code in upper for code in
+                               ["HTTP 500", "HTTP 502", "HTTP 503",
+                                "HTTP 504", "HTTP ERROR 500",
+                                "HTTP ERROR 502", "HTTP ERROR 503",
+                                "HTTP ERROR 504"]):
+                          server_errors.append((workflow, line))
+
+                      elif any(word in upper for word in
+                               ["TIMEOUT", "TIMED OUT", "FAILED",
+                                "ERROR", "NO ADDRESS ASSOCIATED"]):
+                          retry_errors.append((workflow, line))
+
+          
           print("\n" + "=" * 60)
           print("CENTRAL ASSESSMENT")
 
+          print("Server errors:", len(server_errors))
+          print("Errors requiring recheck:", len(retry_errors))
+          print("Access restrictions (403):", len(info_events))
+          print("Missing reports:", len(missing))
+
+          affected_modules = len(set(
+              workflow for workflow, line in server_errors
+          ))
+
           if missing:
               print("ALERT LEVEL: UNKNOWN")
-              print("Missing reports:", len(missing))
-          elif problems:
+              print("Some monitoring reports are unavailable.")
+
+          elif affected_modules >= 3:
+              print("ALERT LEVEL: RED")
+              print("Multiple independent modules report server errors.")
+
+          elif affected_modules >= 2:
+              print("ALERT LEVEL: ORANGE")
+              print("Several monitoring modules report server errors.")
+
+          elif server_errors:
               print("ALERT LEVEL: YELLOW")
-              print("Potential problems:", len(problems))
+              print("Server error detected. Further verification required.")
+
+          elif retry_errors:
+              print("ALERT LEVEL: YELLOW")
+              print("Connectivity or DNS issues require rechecking.")
+
           else:
               print("ALERT LEVEL: GREEN")
-              print("No explicit errors found in reports.")
+              print("No confirmed infrastructure failures detected.")
 
-          print("NOTE: HTTP 403 alone does not prove an outage.")
-          print("A successful website response does not prove the")
-          print("underlying service is fully operational.")
+          if info_events:
+              print("\nINFORMATIONAL EVENTS:")
+              for workflow, line in info_events:
+                  print("-", workflow, "|", line)
+
+          print("\nNOTE: HTTP 403 is not treated as an outage.")
+          print("A successful HTTP response does not guarantee")
+          print("that the underlying service is fully operational.")
+
           PY
