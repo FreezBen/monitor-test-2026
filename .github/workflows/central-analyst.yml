@@ -1,4 +1,3 @@
-
 name: Central Infrastructure Analyst
 
 on:
@@ -10,13 +9,17 @@ permissions:
   actions: read
   contents: write
 
+concurrency:
+  group: central-infrastructure-analyst
+  cancel-in-progress: false
+
 jobs:
   collect:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: true
 
@@ -27,176 +30,353 @@ jobs:
         run: |
           python - <<'PY'
           import os
+          import re
           import json
-          import urllib.request
-          import zipfile
           import io
+          import zipfile
+          import urllib.request
+          import urllib.error
           import datetime
+          from urllib.parse import urlparse
+          from urllib.request import HTTPRedirectHandler, build_opener
 
-          token = os.environ["GH_TOKEN"]
-          repo = os.environ["REPOSITORY"]
-          base = f"https://api.github.com/repos/{repo}"
+          print("CENTRAL INFRASTRUCTURE ANALYST")
+          now = datetime.datetime.now(datetime.timezone.utc)
+          print("UTC:", now.isoformat())
+          print("=" * 60)
 
-          headers = {
-              "Authorization": f"Bearer {token}",
-              "Accept": "application/vnd.github+json",
-              "X-GitHub-Api-Version": "2022-11-28"
-          }
+          TOKEN = os.environ["GH_TOKEN"]
+          REPO = os.environ["REPOSITORY"]
+          API = "https://api.github.com"
 
-          targets = {
+          MODULES = {
               "Critical Infrastructure Monitor": "monitor-report",
               "Europe and Poland Monitor": "europe-report",
               "Global Network Monitor": "global-report",
               "Gaming Infrastructure Monitor": "gaming-report"
           }
 
-          missing = []
-          server_errors = []
-          retry_errors = []
-          info_events = []
+          class SafeRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  new_req = super().redirect_request(
+                      req, fp, code, msg, headers, newurl
+                  )
+                  if new_req:
+                      if urlparse(req.full_url).netloc != urlparse(newurl).netloc:
+                          new_req.remove_header("Authorization")
+                          new_req.remove_header("Accept")
+                  return new_req
 
-          def get_json(url):
-              req = urllib.request.Request(url, headers=headers)
-              with urllib.request.urlopen(req, timeout=30) as r:
-                  return json.loads(r.read().decode())
+          opener = build_opener(SafeRedirect)
 
-          print("CENTRAL INFRASTRUCTURE ANALYST")
-          print("UTC:", datetime.datetime.now(datetime.timezone.utc))
-          print("=" * 60)
+          def request_url(url, binary=False):
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "Authorization": "Bearer " + TOKEN,
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "Infrastructure-Monitor"
+                  }
+              )
+              with opener.open(req, timeout=45) as response:
+                  data = response.read()
+              if binary:
+                  return data
+              return json.loads(data.decode("utf-8"))
 
-          runs_data = get_json(base + "/actions/runs?per_page=100")
-          runs = runs_data.get("workflow_runs", [])
+          def get_latest_run(workflow_name):
+              url = API + "/repos/" + REPO + "/actions/runs?per_page=100"
+              data = request_url(url)
 
-          for workflow, artifact_name in targets.items():
-              print("\nMODULE:", workflow)
-
-              matching = [
-                  r for r in runs
-                  if r.get("name") == workflow
+              matches = [
+                  r for r in data.get("workflow_runs", [])
+                  if r.get("name") == workflow_name
                   and r.get("status") == "completed"
+                  and r.get("conclusion") == "success"
               ]
 
-              if not matching:
-                  print("UNKNOWN: No completed run found")
-                  missing.append(workflow)
-                  continue
+              if not matches:
+                  return None
 
-              run = matching[0]
-              print("Run:", run["id"])
-              print("Conclusion:", run.get("conclusion"))
+              matches.sort(
+                  key=lambda r: r.get("created_at", ""),
+                  reverse=True
+              )
+              return matches[0]
 
-              artifacts_data = get_json(
-                  base + f"/actions/runs/{run['id']}/artifacts"
+          def get_report(artifact_name, run_id):
+              url = (
+                  API + "/repos/" + REPO
+                  + "/actions/runs/" + str(run_id)
+                  + "/artifacts?per_page=100"
               )
 
+              data = request_url(url)
+
               artifact = next(
-                  (a for a in artifacts_data.get("artifacts", [])
-                   if a.get("name") == artifact_name
-                   and not a.get("expired")),
+                  (
+                      a for a in data.get("artifacts", [])
+                      if a.get("name") == artifact_name
+                      and not a.get("expired", False)
+                  ),
                   None
               )
 
               if not artifact:
-                  print("UNKNOWN: Report artifact not found")
-                  missing.append(workflow)
-                  continue
+                  return None
 
-              download_url = artifact["archive_download_url"]
+              archive_url = (
+                  API + "/repos/" + REPO
+                  + "/actions/artifacts/"
+                  + str(artifact["id"]) + "/zip"
+              )
 
-              class SafeRedirect(urllib.request.HTTPRedirectHandler):
-                  def redirect_request(self, req, fp, code, msg, hdrs, newurl):
-                      return urllib.request.Request(
-                          newurl,
-                          headers={"User-Agent": "Infrastructure-Monitor"}
-                      )
+              archive = request_url(archive_url, binary=True)
 
-              opener = urllib.request.build_opener(SafeRedirect())
-              req = urllib.request.Request(download_url, headers=headers)
+              with zipfile.ZipFile(io.BytesIO(archive)) as z:
+                  files = [
+                      name for name in z.namelist()
+                      if name.lower().endswith((".txt", ".log"))
+                  ]
 
-              with opener.open(req, timeout=60) as r:
-                  archive = zipfile.ZipFile(io.BytesIO(r.read()))
+                  if not files:
+                      return None
 
-              for filename in archive.namelist():
-                  if not filename.endswith(".txt"):
-                      continue
-
-                  report = archive.read(filename).decode(
-                      "utf-8", errors="replace"
+                  return "\n".join(
+                      z.read(name).decode("utf-8", errors="replace")
+                      for name in files
                   )
 
-                  print("--- REPORT:", filename, "---")
+          # --------------------------------------------------
+          # COLLECT REPORTS
+          # --------------------------------------------------
+
+          server_errors = []
+          retry_errors = []
+          info_events = []
+          missing = []
+          dns_events = []
+          affected_modules = set()
+          provider_failures = {}
+          dns_providers = {}
+
+          def identify_provider(label):
+              value = label.lower()
+
+              aliases = [
+                  ("cloudflare", "Cloudflare"),
+                  ("aws", "AWS"),
+                  ("amazon", "AWS"),
+                  ("google", "Google"),
+                  ("azure", "Microsoft Azure"),
+                  ("microsoft", "Microsoft Azure"),
+                  ("github", "GitHub"),
+                  ("openai", "OpenAI"),
+                  ("steam", "Steam"),
+                  ("akamai", "Akamai"),
+                  ("fastly", "Fastly"),
+                  ("cloudfront", "CloudFront"),
+                  ("orange", "Orange"),
+                  ("deutsche telekom", "Deutsche Telekom"),
+                  ("national grid", "National Grid"),
+                  ("entso-e", "ENTSO-E"),
+                  ("ripe", "RIPE NCC"),
+                  ("cert polska", "CERT Polska"),
+                  ("pse", "PSE"),
+                  ("nask", "NASK"),
+                  ("icann", "ICANN")
+              ]
+
+              for key, name in aliases:
+                  if key in value:
+                      return name
+
+              return label.strip()
+
+          dns_patterns = [
+              "dns lookup",
+              "name resolution",
+              "getaddrinfo failed",
+              "temporary failure in name resolution",
+              "failed to resolve",
+              "could not resolve",
+              "name or service not known",
+              "nodename nor servname",
+              "dns_probe",
+              "no address associated"
+          ]
+
+          timeout_patterns = [
+              "timed out",
+              "timeout",
+              "connection refused",
+              "connection reset",
+              "connectionerror",
+              "urlopen error",
+              "network is unreachable",
+              "failed to establish",
+              "max retries exceeded",
+              "remote end closed",
+              "ssl error"
+          ]
+
+          for module, artifact in MODULES.items():
+              print("\nMODULE:", module)
+
+              try:
+                  run = get_latest_run(module)
+
+                  if not run:
+                      print("WARNING: No successful completed run found.")
+                      missing.append(module)
+                      continue
+
+                  print("Run:", run["id"])
+                  print("Conclusion:", run["conclusion"])
+
+                  report = get_report(artifact, run["id"])
+
+                  if report is None:
+                      print("WARNING: Report artifact not found.")
+                      missing.append(module)
+                      continue
+
+                  print("--- REPORT ---")
+                  print(report)
+
+                  module_has_problem = False
 
                   for line in report.splitlines():
-                      print(line)
-                      upper = line.upper()
+                      if "|" not in line:
+                          continue
 
-                      if "HTTP ERROR 403" in upper or "HTTP 403" in upper:
-                          info_events.append((workflow, line))
+                      parts = line.split("|")
+                      if len(parts) < 3:
+                          continue
 
-                      elif any(code in upper for code in
-                               ["HTTP 500", "HTTP 502", "HTTP 503",
-                                "HTTP 504", "HTTP ERROR 500",
-                                "HTTP ERROR 502", "HTTP ERROR 503",
-                                "HTTP ERROR 504"]):
-                          server_errors.append((workflow, line))
+                      status = parts[0].strip().upper()
+                      label = parts[1].strip()
+                      details = "|".join(parts[2:]).strip()
+                      lower = (line + " " + details).lower()
 
-                      elif any(word in upper for word in
-                               ["TIMEOUT", "TIMED OUT", "FAILED",
-                                "ERROR", "NO ADDRESS ASSOCIATED"]):
-                          retry_errors.append((workflow, line))
+                      provider = identify_provider(label)
+
+                      http_match = re.search(
+                          r"HTTP(?:\s+Error)?\s*[:=]?\s*(\d{3})",
+                          details,
+                          re.IGNORECASE
+                      )
+
+                      http_code = (
+                          int(http_match.group(1))
+                          if http_match else None
+                      )
+
+                      # HTTP 403 is an access restriction,
+                      # not proof of a service outage.
+                      if http_code == 403:
+                          info_events.append({
+                              "module": module,
+                              "provider": provider,
+                              "line": line
+                          })
+                          continue
+
+                      is_dns = any(
+                          pattern in lower for pattern in dns_patterns
+                      )
+
+                      is_timeout = any(
+                          pattern in lower for pattern in timeout_patterns
+                      )
+
+                      is_server_error = (
+                          http_code is not None
+                          and 500 <= http_code <= 599
+                      )
+
+                      is_retry_error = (
+                          is_dns
+                          or is_timeout
+                          or (
+                              http_code is not None
+                              and 400 <= http_code <= 499
+                          )
+                          or status in ("ERROR", "FAIL", "FAILED")
+                          or (
+                              status == "WARNING"
+                              and not is_server_error
+                          )
+                      )
+
+                      if is_server_error:
+                          server_errors.append({
+                              "module": module,
+                              "provider": provider,
+                              "line": line
+                          })
+                          provider_failures[provider] = (
+                              provider_failures.get(provider, 0) + 1
+                          )
+                          module_has_problem = True
+
+                      elif is_retry_error:
+                          retry_errors.append({
+                              "module": module,
+                              "provider": provider,
+                              "line": line
+                          })
+                          provider_failures[provider] = (
+                              provider_failures.get(provider, 0) + 1
+                          )
+                          module_has_problem = True
+
+                          if is_dns:
+                              dns_events.append({
+                                  "module": module,
+                                  "provider": provider,
+                                  "line": line
+                              })
+                              dns_providers[provider] = (
+                                  dns_providers.get(provider, 0) + 1
+                              )
+
+                  if module_has_problem:
+                      affected_modules.add(module)
+
+              except Exception as error:
+                  print("COLLECTION ERROR:", str(error))
+                  missing.append(module)
+
+          # --------------------------------------------------
+          # CURRENT ANALYSIS
+          # --------------------------------------------------
+
+          failed_providers = sorted(provider_failures.keys())
 
           print("\n" + "=" * 60)
-          print("CENTRAL ASSESSMENT")
+          print("CURRENT ANALYSIS")
+          print("=" * 60)
 
           print("Server errors:", len(server_errors))
-          print("Errors requiring recheck:", len(retry_errors))
-          print("Access restrictions (403):", len(info_events))
+          print("Retry errors:", len(retry_errors))
+          print("DNS errors:", len(dns_events))
+          print("Access restrictions:", len(info_events))
           print("Missing reports:", len(missing))
+          print("Affected modules:", len(affected_modules))
+          print("Independent affected providers:", len(failed_providers))
 
-          affected_modules = len(set(
-              workflow for workflow, line in server_errors
-          ))
+          if failed_providers:
+              print("Affected providers:", ", ".join(failed_providers))
 
-          if missing:
-              alert_level = "UNKNOWN"
-              print("ALERT LEVEL: UNKNOWN")
-              print("Some monitoring reports are unavailable.")
+          if dns_providers:
+              print("DNS failure providers:", json.dumps(dns_providers))
 
-          elif affected_modules >= 3:
-              alert_level = "RED"
-              print("ALERT LEVEL: RED")
-              print("Multiple independent modules report server errors.")
+          # --------------------------------------------------
+          # LOAD HISTORY
+          # --------------------------------------------------
 
-          elif affected_modules >= 2:
-              alert_level = "ORANGE"
-              print("ALERT LEVEL: ORANGE")
-              print("Several monitoring modules report server errors.")
-
-          elif server_errors:
-              alert_level = "YELLOW"
-              print("ALERT LEVEL: YELLOW")
-              print("Server error detected. Further verification required.")
-
-          elif retry_errors:
-              alert_level = "YELLOW"
-              print("ALERT LEVEL: YELLOW")
-              print("Connectivity or DNS issues require rechecking.")
-
-          else:
-              alert_level = "GREEN"
-              print("ALERT LEVEL: GREEN")
-              print("No confirmed infrastructure failures detected.")
-
-          if info_events:
-              print("\nINFORMATIONAL EVENTS:")
-              for workflow, line in info_events:
-                  print("-", workflow, "|", line)
-
-          print("\nNOTE: HTTP 403 is not treated as an outage.")
-          print("A successful HTTP response does not guarantee")
-          print("that the underlying service is fully operational.")
-
-          # ANALYZE HISTORICAL TRENDS
           history_path = "reports/history.jsonl"
           os.makedirs("reports", exist_ok=True)
 
@@ -205,54 +385,225 @@ jobs:
           if os.path.exists(history_path):
               with open(history_path, "r", encoding="utf-8") as history:
                   for line in history:
-                      if line.strip():
-                          try:
-                              records.append(json.loads(line))
-                          except json.JSONDecodeError:
-                              print("WARNING: Invalid history line skipped.")
+                      if not line.strip():
+                          continue
+                      try:
+                          records.append(json.loads(line))
+                      except json.JSONDecodeError:
+                          print("WARNING: Invalid history record skipped.")
+
+          def parse_time(record):
+              try:
+                  value = record["timestamp"].replace("Z", "+00:00")
+                  return datetime.datetime.fromisoformat(value)
+              except Exception:
+                  return None
+
+          # --------------------------------------------------
+          # REPEATED DNS ANALYSIS
+          # --------------------------------------------------
+
+          def recent_records(hours):
+              start = now - datetime.timedelta(hours=hours)
+              result = []
+
+              for record in records:
+                  timestamp = parse_time(record)
+                  if timestamp and start <= timestamp <= now:
+                      result.append(record)
+
+              return result
+
+          last_6h = recent_records(6)
+
+          dns_6h = sum(
+              r.get("dns_errors", 0)
+              for r in last_6h
+          ) + len(dns_events)
+
+          print("\n" + "=" * 60)
+          print("DNS RECURRING FAILURE ANALYSIS")
+          print("=" * 60)
+
+          print("DNS errors in last 6 hours:", dns_6h)
+
+          if dns_6h >= 6:
+              print("DNS STATUS: CRITICAL - repeated failures")
+          elif dns_6h >= 3:
+              print("DNS STATUS: WARNING - recurring failures")
+          elif dns_6h > 0:
+              print("DNS STATUS: Isolated failures detected")
+          else:
+              print("DNS STATUS: No recorded failures")
+
+          # --------------------------------------------------
+          # SIX-HOUR AND 24-HOUR TREND ANALYSIS
+          # --------------------------------------------------
+
+          current_record = {
+              "timestamp": now.isoformat(),
+              "server_errors": len(server_errors),
+              "retry_errors": len(retry_errors),
+              "dns_errors": len(dns_events),
+              "access_restrictions": len(info_events),
+              "missing_reports": len(missing),
+              "affected_modules": len(affected_modules),
+              "failed_providers": failed_providers
+          }
+
+          analysis_records = records + [current_record]
+
+          def summarize_window(hours, end_time):
+              start_time = end_time - datetime.timedelta(hours=hours)
+
+              selected = []
+
+              for record in analysis_records:
+                  timestamp = parse_time(record)
+
+                  if timestamp and start_time <= timestamp < end_time:
+                      selected.append(record)
+
+              problem_checks = sum(
+                  1 for r in selected
+                  if r.get("server_errors", 0) > 0
+                  or r.get("retry_errors", 0) > 0
+              )
+
+              return {
+                  "records": len(selected),
+                  "problem_checks": problem_checks,
+                  "server_errors": sum(
+                      r.get("server_errors", 0) for r in selected
+                  ),
+                  "retry_errors": sum(
+                      r.get("retry_errors", 0) for r in selected
+                  ),
+                  "dns_errors": sum(
+                      r.get("dns_errors", 0) for r in selected
+                  )
+              }
+
+          def compare_windows(hours):
+              current = summarize_window(hours, now)
+              previous = summarize_window(
+                  hours,
+                  now - datetime.timedelta(hours=hours)
+              )
+
+              print("\nPERIOD:", hours, "HOURS")
+              print("Current period records:", current["records"])
+              print("Previous period records:", previous["records"])
+              print("Current problem checks:", current["problem_checks"])
+              print("Previous problem checks:", previous["problem_checks"])
+              print("Current server errors:", current["server_errors"])
+              print("Current DNS errors:", current["dns_errors"])
+
+              if previous["records"] < 2:
+                  trend = "INSUFFICIENT DATA"
+              elif (
+                  current["problem_checks"] >= 3
+                  and current["problem_checks"]
+                  > previous["problem_checks"] * 1.5
+              ):
+                  trend = "DETERIORATING"
+              elif (
+                  previous["problem_checks"] >= 3
+                  and current["problem_checks"]
+                  < previous["problem_checks"]
+              ):
+                  trend = "IMPROVING"
+              else:
+                  trend = "STABLE"
+
+              print("TREND:", trend)
+
+              return current, previous, trend
 
           print("\n" + "=" * 60)
           print("HISTORICAL TREND ANALYSIS")
+          print("=" * 60)
 
-          if records:
-              previous = records[-1]
+          current_6h, previous_6h, trend_6h = compare_windows(6)
+          current_24h, previous_24h, trend_24h = compare_windows(24)
 
-              previous_errors = previous.get("server_errors", 0)
-              current_errors = len(server_errors)
+          # --------------------------------------------------
+          # AUTOMATIC ALERT LEVEL
+          # --------------------------------------------------
 
-              print("Previous server errors:", previous_errors)
-              print("Current server errors:", current_errors)
+          alert_level = "GREEN"
 
-              if current_errors > previous_errors:
-                  print("TREND: DETERIORATING")
-              elif current_errors < previous_errors:
-                  print("TREND: IMPROVING")
-              else:
-                  print("TREND: STABLE")
+          if (
+              len(failed_providers) >= 2
+              and len(server_errors) + len(retry_errors) >= 2
+          ):
+              alert_level = "RED"
 
-              print("Previous alert:", previous.get("alert_level", "UNKNOWN"))
-              print("Current alert:", alert_level)
+          elif (
+              len(server_errors) >= 3
+              and len(failed_providers) >= 2
+          ):
+              alert_level = "RED"
 
+          elif dns_6h >= 6:
+              alert_level = "RED"
+
+          elif (
+              server_errors
+              or retry_errors
+              or missing
+              or dns_6h >= 3
+          ):
+              alert_level = "YELLOW"
+
+          # Escalate when the six-hour trend deteriorates
+          # and multiple problematic checks are recorded.
+          if (
+              trend_6h == "DETERIORATING"
+              and current_6h["problem_checks"] >= 6
+          ):
+              alert_level = "RED"
+
+          print("\n" + "=" * 60)
+          print("FINAL INFRASTRUCTURE ASSESSMENT")
+          print("=" * 60)
+
+          print("ALERT LEVEL:", alert_level)
+          print("TREND 6H:", trend_6h)
+          print("TREND 24H:", trend_24h)
+
+          if alert_level == "RED":
+              print("CRITICAL: Multiple or persistent infrastructure problems.")
+          elif alert_level == "YELLOW":
+              print("WARNING: Issues detected; further monitoring required.")
           else:
-              print("Not enough historical data for comparison.")
+              print("NORMAL: No confirmed problems in monitored endpoints.")
 
-          # SAVE ANALYSIS HISTORY
+          # --------------------------------------------------
+          # SAVE HISTORY
+          # --------------------------------------------------
+
           history_record = {
-              "timestamp": datetime.datetime.now(
-                  datetime.timezone.utc
-              ).isoformat(),
+              "timestamp": now.isoformat(),
               "server_errors": len(server_errors),
               "retry_errors": len(retry_errors),
+              "dns_errors": len(dns_events),
               "access_restrictions": len(info_events),
               "missing_reports": len(missing),
-              "affected_modules": affected_modules,
-              "alert_level": alert_level
+              "affected_modules": len(affected_modules),
+              "failed_providers": failed_providers,
+              "dns_providers": dns_providers,
+              "alert_level": alert_level,
+              "trend_6h": trend_6h,
+              "trend_24h": trend_24h,
+              "problem_checks_6h": current_6h["problem_checks"],
+              "problem_checks_24h": current_24h["problem_checks"]
           }
 
           with open(history_path, "a", encoding="utf-8") as history:
               history.write(json.dumps(history_record) + "\n")
 
-          print("HISTORY: New analysis record saved.")
+          print("\nHISTORY: New analysis record saved.")
           print("HISTORY RECORDS:", len(records) + 1)
           PY
 
@@ -260,7 +611,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add reports/history.jsonl
+
           if git diff --cached --quiet; then
             echo "No history changes to commit"
           else
