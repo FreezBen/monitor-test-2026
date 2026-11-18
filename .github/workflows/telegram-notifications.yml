@@ -63,19 +63,21 @@ jobs:
               )
 
               with urllib.request.urlopen(request, timeout=30) as response:
-                  result = json.loads(response.read().decode("utf-8"))
+                  result = json.loads(
+                      response.read().decode("utf-8")
+                  )
 
               if not result.get("ok"):
-                  raise RuntimeError("Telegram rejected the message")
+                  raise RuntimeError("Telegram rejected message")
 
               print("TELEGRAM: Message sent successfully.")
 
-          # Manual launch: send a connection test.
+          # Manual test
           if EVENT == "workflow_dispatch":
               send_message(
                   "INFRASTRUCTURE MONITOR\n\n"
                   "Telegram connection successful!\n"
-                  "Your monitoring notifications are configured."
+                  "Automatic alerts are active."
               )
               raise SystemExit(0)
 
@@ -96,40 +98,96 @@ jobs:
                           continue
 
           if len(records) < 2:
-              print("Not enough history for comparison.")
+              print("Not enough history.")
               raise SystemExit(0)
 
-          previous = records[-2]
           current = records[-1]
+          previous = records[-2]
 
           old_level = previous.get("alert_level", "UNKNOWN")
           new_level = current.get("alert_level", "UNKNOWN")
 
-          if old_level == new_level:
-              print("No alert level change. No notification.")
-              raise SystemExit(0)
-
           timestamp = current.get("timestamp", "Unknown")
 
-          message = (
-              "INFRASTRUCTURE MONITOR\n\n"
-              "ALERT LEVEL CHANGED\n\n"
-              + old_level + " -> " + new_level
-              + "\n\n"
-              + "Server errors: "
-              + str(current.get("server_errors", 0))
-              + "\nRetry errors: "
-              + str(current.get("retry_errors", 0))
-              + "\nDNS errors: "
-              + str(current.get("dns_errors", 0))
-              + "\nAffected modules: "
-              + str(current.get("affected_modules", 0))
-              + "\n\nTrend 6H: "
-              + str(current.get("trend_6h", "UNKNOWN"))
-              + "\nTrend 24H: "
-              + str(current.get("trend_24h", "UNKNOWN"))
-              + "\n\nUTC: " + timestamp
-          )
+          server_errors = current.get("server_errors", 0)
+          retry_errors = current.get("retry_errors", 0)
+          dns_errors = current.get("dns_errors", 0)
+          affected = current.get("affected_modules", 0)
 
-          send_message(message)
+          trend_6h = current.get("trend_6h", "UNKNOWN")
+          trend_24h = current.get("trend_24h", "UNKNOWN")
+
+          message = None
+
+          # Count consecutive RED records
+          consecutive_red = 0
+
+          for record in reversed(records):
+              if record.get("alert_level") == "RED":
+                  consecutive_red += 1
+              else:
+                  break
+
+          # First RED: immediate critical alert
+          if new_level == "RED" and old_level != "RED":
+              message = (
+                  "CRITICAL INFRASTRUCTURE ALERT\n\n"
+                  "RED ALERT DETECTED!\n\n"
+                  "Infrastructure problems detected.\n\n"
+                  "Server errors: " + str(server_errors)
+                  + "\nRetry errors: " + str(retry_errors)
+                  + "\nDNS errors: " + str(dns_errors)
+                  + "\nAffected modules: " + str(affected)
+                  + "\n\nTrend 6H: " + str(trend_6h)
+                  + "\nTrend 24H: " + str(trend_24h)
+                  + "\n\nUTC: " + str(timestamp)
+              )
+
+          # Repeated RED: reminder every 3 checks
+          elif new_level == "RED" and consecutive_red % 3 == 0:
+              message = (
+                  "INFRASTRUCTURE ALERT REMINDER\n\n"
+                  "RED ALERT IS STILL ACTIVE!\n\n"
+                  "Consecutive critical checks: "
+                  + str(consecutive_red)
+                  + "\nServer errors: " + str(server_errors)
+                  + "\nRetry errors: " + str(retry_errors)
+                  + "\nDNS errors: " + str(dns_errors)
+                  + "\n\nUTC: " + str(timestamp)
+              )
+
+          # Recovery
+          elif (
+              new_level == "GREEN"
+              and old_level in ("RED", "YELLOW")
+          ):
+              message = (
+                  "INFRASTRUCTURE RECOVERY\n\n"
+                  "PROBLEMS HAVE CLEARED!\n\n"
+                  "Previous level: " + old_level
+                  + "\nCurrent level: GREEN"
+                  + "\n\nServer errors: " + str(server_errors)
+                  + "\nRetry errors: " + str(retry_errors)
+                  + "\nDNS errors: " + str(dns_errors)
+                  + "\n\nUTC: " + str(timestamp)
+              )
+
+          # Other alert level changes
+          elif new_level != old_level:
+              message = (
+                  "INFRASTRUCTURE STATUS CHANGE\n\n"
+                  + old_level + " -> " + new_level
+                  + "\n\nServer errors: " + str(server_errors)
+                  + "\nRetry errors: " + str(retry_errors)
+                  + "\nDNS errors: " + str(dns_errors)
+                  + "\n\nUTC: " + str(timestamp)
+              )
+
+          if message:
+              send_message(message)
+          else:
+              print(
+                  "No notification required. "
+                  "Current level:", new_level
+              )
           PY
