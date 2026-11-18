@@ -1,0 +1,135 @@
+
+name: Telegram Infrastructure Notifications
+
+on:
+  workflow_run:
+    workflows:
+      - "Central Infrastructure Analyst"
+    types:
+      - completed
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Send Telegram notification
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+
+          TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+          CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+          EVENT = os.environ["EVENT_NAME"]
+
+          if not TOKEN or not CHAT_ID:
+              raise RuntimeError("Telegram secrets are missing")
+
+          def send_message(message):
+              url = (
+                  "https://api.telegram.org/bot"
+                  + TOKEN
+                  + "/sendMessage"
+              )
+
+              payload = {
+                  "chat_id": CHAT_ID,
+                  "text": message
+              }
+
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  result = json.loads(response.read().decode("utf-8"))
+
+              if not result.get("ok"):
+                  raise RuntimeError("Telegram rejected the message")
+
+              print("TELEGRAM: Message sent successfully.")
+
+          # Manual launch: send a connection test.
+          if EVENT == "workflow_dispatch":
+              send_message(
+                  "INFRASTRUCTURE MONITOR\n\n"
+                  "Telegram connection successful!\n"
+                  "Your monitoring notifications are configured."
+              )
+              raise SystemExit(0)
+
+          history_path = "reports/history.jsonl"
+
+          if not os.path.exists(history_path):
+              print("History file not found.")
+              raise SystemExit(0)
+
+          records = []
+
+          with open(history_path, "r", encoding="utf-8") as file:
+              for line in file:
+                  if line.strip():
+                      try:
+                          records.append(json.loads(line))
+                      except json.JSONDecodeError:
+                          continue
+
+          if len(records) < 2:
+              print("Not enough history for comparison.")
+              raise SystemExit(0)
+
+          previous = records[-2]
+          current = records[-1]
+
+          old_level = previous.get("alert_level", "UNKNOWN")
+          new_level = current.get("alert_level", "UNKNOWN")
+
+          if old_level == new_level:
+              print("No alert level change. No notification.")
+              raise SystemExit(0)
+
+          timestamp = current.get("timestamp", "Unknown")
+
+          message = (
+              "INFRASTRUCTURE MONITOR\n\n"
+              "ALERT LEVEL CHANGED\n\n"
+              + old_level + " -> " + new_level
+              + "\n\n"
+              + "Server errors: "
+              + str(current.get("server_errors", 0))
+              + "\nRetry errors: "
+              + str(current.get("retry_errors", 0))
+              + "\nDNS errors: "
+              + str(current.get("dns_errors", 0))
+              + "\nAffected modules: "
+              + str(current.get("affected_modules", 0))
+              + "\n\nTrend 6H: "
+              + str(current.get("trend_6h", "UNKNOWN"))
+              + "\nTrend 24H: "
+              + str(current.get("trend_24h", "UNKNOWN"))
+              + "\n\nUTC: " + timestamp
+          )
+
+          send_message(message)
+          PY
