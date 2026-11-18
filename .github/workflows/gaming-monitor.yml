@@ -294,7 +294,7 @@ jobs:
           PY
 
       - name: Save gaming monitoring report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: gaming-report
           path: gaming-report.txt
