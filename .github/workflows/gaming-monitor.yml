@@ -1,4 +1,3 @@
-
 name: Gaming Infrastructure Monitor
 
 on:
@@ -12,73 +11,195 @@ permissions:
 jobs:
   gaming-monitor:
     runs-on: ubuntu-latest
+
     steps:
       - name: Check gaming infrastructure
         run: |
           python - <<'PY' | tee gaming-report.txt
           import urllib.request
-          import urllib.parse
-          import json
+          import urllib.error
+          import socket
+          import ssl
           import datetime
+          import time
+          from urllib.parse import urlparse
 
           print("GAMING INFRASTRUCTURE MONITOR")
-          print("Time UTC:", datetime.datetime.now(datetime.timezone.utc))
-          print("=" * 60)
+          print("Time UTC:", datetime.datetime.now(
+              datetime.timezone.utc
+          ).isoformat())
+          print("=" * 65)
 
-          websites = {
-              "Steam Store": "https://store.steampowered.com/",
-              "Steam Community": "https://steamcommunity.com/",
-              "Steam Web API": "https://api.steampowered.com/ISteamWebAPIUtil/GetSupportedAPIList/v1/",
-              "Dota 2": "https://www.dota2.com/",
-              "Counter-Strike 2": "https://www.counter-strike.net/",
-              "Steam CDN": "https://cdn.cloudflare.steamstatic.com/",
-          }
+          checks = [
+              ("Steam Store", "https://store.steampowered.com/"),
+              ("Steam Community", "https://steamcommunity.com/"),
+              ("Steam Web API", "https://api.steampowered.com/ISteamWebAPIUtil/GetSupportedAPIList/v1/"),
+              ("Steam Help", "https://help.steampowered.com/"),
+              ("Steam CDN", "https://cdn.cloudflare.steamstatic.com/"),
+              ("Steam CDN Akamai", "https://steamcdn-a.akamaihd.net/"),
 
-          print("\n--- GAMING SERVICES ---")
+              ("Dota 2 Website", "https://www.dota2.com/"),
+              ("Dota 2 Steam Community", "https://steamcommunity.com/app/570/"),
+              ("Dota 2 Steam Store", "https://store.steampowered.com/app/570/"),
 
-          for name, url in websites.items():
+              ("CS2 Website", "https://www.counter-strike.net/"),
+              ("CS2 Steam Community", "https://steamcommunity.com/app/730/"),
+              ("CS2 Steam Store", "https://store.steampowered.com/app/730/"),
+          ]
+
+          results = []
+
+          def report(status, name, details):
+              line = f"{status} | {name} | {details}"
+              print(line)
+              results.append((status, name, details))
+
+          def http_check(name, url):
               try:
-                  req = urllib.request.Request(
+                  request = urllib.request.Request(
                       url,
-                      headers={"User-Agent": "GamingMonitor/1.0"}
+                      headers={
+                          "User-Agent": "Mozilla/5.0 GamingInfrastructureMonitor/2.0"
+                      }
                   )
-                  with urllib.request.urlopen(req, timeout=15) as response:
-                      print(f"OK | {name} | HTTP {response.status}")
+
+                  with urllib.request.urlopen(
+                      request, timeout=15
+                  ) as response:
+                      response.read(1024)
+                      report(
+                          "OK",
+                          name,
+                          f"HTTP {response.status}"
+                      )
+
+              except urllib.error.HTTPError as error:
+                  report(
+                      "WARNING",
+                      name,
+                      f"HTTP Error {error.code}: {error.reason}"
+                  )
+
               except Exception as error:
-                  print(f"WARNING | {name} | {error}")
+                  report(
+                      "WARNING",
+                      name,
+                      str(error)[:250]
+                  )
 
-          print("\n--- STEAM NETWORK STATUS ---")
+          def dns_check(name, host):
+              try:
+                  addresses = socket.getaddrinfo(
+                      host, 443,
+                      type=socket.SOCK_STREAM
+                  )
 
-          try:
-              url = "https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/"
-              req = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "GamingMonitor/1.0"}
-              )
-              with urllib.request.urlopen(req, timeout=15) as response:
-                  data = json.loads(response.read().decode())
-                  print("OK | Steam Server Info API |", data)
-          except Exception as error:
-              print("WARNING | Steam Server Info API |", error)
+                  unique = sorted(set(
+                      item[4][0] for item in addresses
+                  ))
 
-          print("\n--- STEAM STATUS DATA ---")
+                  report(
+                      "OK",
+                      name,
+                      "DNS resolved: " + ", ".join(unique[:3])
+                  )
 
-          try:
-              url = "https://api.steampowered.com/ISteamWebAPIUtil/GetSupportedAPIList/v1/"
-              req = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "GamingMonitor/1.0"}
-              )
-              with urllib.request.urlopen(req, timeout=15) as response:
-                  print("OK | Steam API | HTTP", response.status)
-          except Exception as error:
-              print("WARNING | Steam API |", error)
+              except Exception as error:
+                  report(
+                      "WARNING",
+                      name,
+                      "DNS lookup failed: " + str(error)[:200]
+                  )
 
-          print("\n--- DOTA 2 COORDINATOR ---")
-          print("INFO | Public endpoint for live coordinator health is not reliably available without a Steam client.")
+          def tcp_check(name, host):
+              try:
+                  with socket.create_connection(
+                      (host, 443), timeout=10
+                  ):
+                      report("OK", name, "TCP port 443 connected")
 
-          print("\n--- CS2 MATCHMAKING ---")
-          print("INFO | Matchmaking health requires dedicated game-client or regional probes.")
+              except Exception as error:
+                  report(
+                      "WARNING",
+                      name,
+                      "TCP connection failed: " + str(error)[:200]
+                  )
+
+          def tls_check(name, host):
+              try:
+                  context = ssl.create_default_context()
+
+                  with socket.create_connection(
+                      (host, 443), timeout=10
+                  ) as connection:
+                      with context.wrap_socket(
+                          connection,
+                          server_hostname=host
+                      ) as secure:
+                          report(
+                              "OK",
+                              name,
+                              "TLS " + str(secure.version())
+                          )
+
+              except Exception as error:
+                  report(
+                      "WARNING",
+                      name,
+                      "TLS connection failed: " + str(error)[:200]
+                  )
+
+          print("\n========== HTTP / HTTPS ==========")
+
+          for name, url in checks:
+              http_check(name, url)
+
+          hosts = [
+              ("Steam Store", "store.steampowered.com"),
+              ("Steam Community", "steamcommunity.com"),
+              ("Steam API", "api.steampowered.com"),
+              ("Steam CDN", "cdn.cloudflare.steamstatic.com"),
+              ("Dota 2", "www.dota2.com"),
+              ("CS2", "www.counter-strike.net"),
+          ]
+
+          print("\n========== DNS CHECKS ==========")
+
+          for name, host in hosts:
+              dns_check(name + " DNS", host)
+
+          print("\n========== TCP CHECKS ==========")
+
+          for name, host in hosts:
+              tcp_check(name + " TCP", host)
+
+          print("\n========== TLS CHECKS ==========")
+
+          for name, host in hosts:
+              tls_check(name + " TLS", host)
+
+          print("\n========== SUMMARY ==========")
+
+          total = len(results)
+          successful = sum(
+              1 for status, _, _ in results
+              if status == "OK"
+          )
+          warnings = total - successful
+
+          print("TOTAL CHECKS:", total)
+          print("SUCCESSFUL:", successful)
+          print("WARNINGS:", warnings)
+
+          print("\n========== IMPORTANT LIMITATIONS ==========")
+          print(
+              "HTTP, DNS, TCP and TLS checks do not prove "
+              "that matchmaking or game coordinators work."
+          )
+          print(
+              "Dota 2 coordinator and CS2 matchmaking "
+              "require dedicated game-client probes."
+          )
 
           print("\nGAMING CHECK FINISHED")
           PY
