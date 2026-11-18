@@ -22,6 +22,7 @@ jobs:
           import ssl
           import datetime
           import time
+          import json
           from urllib.parse import urlparse
 
           print("GAMING INFRASTRUCTURE MONITOR")
@@ -177,6 +178,94 @@ jobs:
 
           for name, host in hosts:
               tls_check(name + " TLS", host)
+
+          print("\n========== CS2 MATCHMAKING STATUS ==========")
+
+          try:
+              url = (
+                  "https://api.steampowered.com/"
+                  "ICSGOServers_730/GetGameServersStatus/v1/"
+              )
+
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "GamingInfrastructureMonitor/2.0"
+                  }
+              )
+
+              with urllib.request.urlopen(
+                  request, timeout=20
+              ) as response:
+                  data = json.loads(
+                      response.read().decode("utf-8")
+                  )
+
+              result = data.get("result")
+
+              if not isinstance(result, dict):
+                  raise ValueError("Invalid Valve API response")
+
+              services = result.get("services", {})
+
+              for name, state in services.items():
+                  state = str(state).lower()
+
+                  status = (
+                      "WARNING"
+                      if state in ("offline", "delayed", "degraded")
+                      else "OK"
+                  )
+
+                  report(
+                      status,
+                      "CS2 " + name,
+                      "Valve status: " + state
+                  )
+
+              matchmaking = result.get("matchmaking", {})
+              scheduler = str(
+                  matchmaking.get("scheduler", "unknown")
+              ).lower()
+
+              report(
+                  "WARNING" if scheduler not in ("normal", "unknown")
+                  else "OK",
+                  "CS2 Matchmaking",
+                  "Scheduler: " + scheduler
+              )
+
+              print(
+                  "CS2 ONLINE SERVERS:",
+                  matchmaking.get("online_servers", "unknown")
+              )
+              print(
+                  "CS2 PLAYERS SEARCHING:",
+                  matchmaking.get("searching_players", "unknown")
+              )
+              print(
+                  "CS2 AVERAGE SEARCH TIME:",
+                  matchmaking.get("search_seconds_avg", "unknown")
+              )
+
+              for region, info in result.get(
+                  "datacenters", {}
+              ).items():
+                  print(
+                      "CS2 REGION:",
+                      region,
+                      "| LOAD:",
+                      info.get("load", "unknown"),
+                      "| CAPACITY:",
+                      info.get("capacity", "unknown")
+                  )
+
+          except Exception as error:
+              report(
+                  "WARNING",
+                  "CS2 Matchmaking API",
+                  str(error)[:250]
+              )
 
           print("\n========== SUMMARY ==========")
 
