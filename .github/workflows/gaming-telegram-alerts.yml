@@ -1,0 +1,304 @@
+
+name: Gaming Service Telegram Alerts
+
+on:
+  workflow_run:
+    workflows:
+      - "Gaming Infrastructure Monitor"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: gaming-telegram-alerts
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: true
+
+      - name: Download gaming report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          mkdir -p reports/gaming-current
+
+          gh run download "$RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name gaming-report \
+            --dir reports/gaming-current
+
+      - name: Analyze gaming services
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import glob
+          import re
+          import urllib.request
+          import datetime
+
+          TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+          CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+
+          if not TOKEN or not CHAT_ID:
+              raise RuntimeError("Telegram secrets missing")
+
+          now = datetime.datetime.now(
+              datetime.timezone.utc
+          ).isoformat()
+
+          # Find downloaded report
+          files = (
+              glob.glob("reports/gaming-current/**/*.txt",
+                        recursive=True)
+              + glob.glob("reports/gaming-current/**/*.log",
+                          recursive=True)
+          )
+
+          if not files:
+              raise RuntimeError("Gaming report not found")
+
+          report = ""
+
+          for path in files:
+              with open(path, encoding="utf-8",
+                        errors="replace") as file:
+                  report += file.read() + "\n"
+
+          problems = []
+          restrictions = []
+          checked = 0
+
+          for line in report.splitlines():
+              if "|" not in line:
+                  continue
+
+              parts = line.split("|")
+
+              if len(parts) < 3:
+                  continue
+
+              status = parts[0].strip().upper()
+              label = parts[1].strip()
+              details = "|".join(parts[2:]).strip()
+
+              lower = (label + " " + details).lower()
+
+              if not any(x in lower for x in
+                         ["steam", "dota", "cs2"]):
+                  continue
+
+              checked += 1
+
+              # 403 is not proof of an outage
+              if re.search(r"\b403\b", details):
+                  restrictions.append(label)
+                  continue
+
+              http = re.search(
+                  r"HTTP(?:\s+Error)?\s*[:=]?\s*(\d{3})",
+                  details,
+                  re.IGNORECASE
+              )
+
+              code = int(http.group(1)) if http else None
+
+              is_problem = (
+                  status not in ("OK", "SUCCESS", "PASS")
+                  or (code is not None and code >= 400)
+                  or any(x in lower for x in [
+                      "timed out",
+                      "timeout",
+                      "connection refused",
+                      "connection reset",
+                      "dns lookup",
+                      "failed to resolve",
+                      "temporary failure in name resolution"
+                  ])
+              )
+
+              if is_problem:
+                  category = "OTHER"
+
+                  if "dota" in lower:
+                      category = "DOTA 2"
+                  elif "steam" in lower:
+                      category = "STEAM"
+                  elif "cs2" in lower:
+                      category = "CS2"
+
+                  problems.append({
+                      "service": category,
+                      "endpoint": label,
+                      "details": details
+                  })
+
+          if checked == 0:
+              raise RuntimeError(
+                  "No recognizable gaming checks found. "
+                  "Refusing to assume services are healthy."
+              )
+
+          print("Gaming checks:", checked)
+          print("Problems:", len(problems))
+          print("Access restrictions:", len(restrictions))
+
+          # Load previous gaming history
+          history_path = "reports/gaming-history.jsonl"
+          os.makedirs("reports", exist_ok=True)
+
+          records = []
+
+          if os.path.exists(history_path):
+              with open(history_path, encoding="utf-8") as file:
+                  for line in file:
+                      try:
+                          if line.strip():
+                              records.append(json.loads(line))
+                      except json.JSONDecodeError:
+                          continue
+
+          previous = records[-1] if records else None
+          had_problem = (
+              previous.get("problem", False)
+              if previous else False
+          )
+
+          current_problem = len(problems) > 0
+
+          consecutive = 0
+
+          if current_problem:
+              for record in reversed(records):
+                  if record.get("problem"):
+                      consecutive += 1
+                  else:
+                      break
+
+              consecutive += 1
+
+          # Prepare Telegram notification
+          message = None
+
+          if current_problem and not had_problem:
+              message = (
+                  "GAMING INFRASTRUCTURE ALERT\n\n"
+                  "PROBLEM DETECTED!\n\n"
+              )
+
+          elif current_problem and consecutive % 3 == 0:
+              message = (
+                  "GAMING INFRASTRUCTURE REMINDER\n\n"
+                  "PROBLEM IS STILL ACTIVE!\n"
+                  "Consecutive checks: "
+                  + str(consecutive) + "\n\n"
+              )
+
+          elif not current_problem and had_problem:
+              message = (
+                  "GAMING INFRASTRUCTURE RECOVERY\n\n"
+                  "ALL CHECKED ENDPOINTS ARE RESPONDING AGAIN.\n\n"
+              )
+
+          if message:
+              if current_problem:
+                  for item in problems:
+                      message += (
+                          "- " + item["service"]
+                          + ": " + item["endpoint"]
+                          + " (" + item["details"] + ")\n"
+                      )
+
+              message += (
+                  "\nChecked endpoints: " + str(checked)
+                  + "\nAccess restrictions (403): "
+                  + str(len(restrictions))
+                  + "\nUTC: " + now
+              )
+
+              url = (
+                  "https://api.telegram.org/bot"
+                  + TOKEN + "/sendMessage"
+              )
+
+              payload = {
+                  "chat_id": CHAT_ID,
+                  "text": message
+              }
+
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={
+                      "Content-Type": "application/json"
+                  },
+                  method="POST"
+              )
+
+              with urllib.request.urlopen(
+                  request, timeout=30
+              ) as response:
+                  result = json.loads(
+                      response.read().decode("utf-8")
+                  )
+
+              if not result.get("ok"):
+                  raise RuntimeError(
+                      "Telegram rejected notification"
+                  )
+
+              print("TELEGRAM: Notification sent.")
+
+          else:
+              print("No notification required.")
+
+          # Save gaming history
+          record = {
+              "timestamp": now,
+              "problem": current_problem,
+              "problem_count": len(problems),
+              "checked": checked,
+              "consecutive_problem_checks": consecutive,
+              "services": sorted(set(
+                  item["service"] for item in problems
+              )),
+              "restrictions_403": len(restrictions)
+          }
+
+          with open(history_path, "a", encoding="utf-8") as file:
+              file.write(json.dumps(record) + "\n")
+
+          print("GAMING HISTORY SAVED")
+          print("TOTAL RECORDS:", len(records) + 1)
+          PY
+
+      - name: Commit gaming history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add reports/gaming-history.jsonl
+
+          if git diff --cached --quiet; then
+            echo "No history changes"
+          else
+            git commit -m "Update gaming monitoring history"
+            git push
+          fi
