@@ -195,10 +195,20 @@ jobs:
 
               consecutive += 1
 
-          # Prepare Telegram notification
+                    # Prepare Telegram notification
           message = None
 
-          if current_problem and not had_problem:
+          if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+              message = (
+                  "GAMING MONITOR TEST\n\n"
+                  "Telegram connection is working!\n"
+                  "Gaming monitoring workflow completed successfully.\n"
+                  "Checked endpoints: " + str(checked) + "\n"
+                  "Detected problems: " + str(len(problems)) + "\n"
+                  "UTC: " + now
+              )
+
+          elif current_problem and not had_problem:
               message = (
                   "GAMING INFRASTRUCTURE ALERT\n\n"
                   "PROBLEM DETECTED!\n\n"
