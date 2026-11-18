@@ -1,3 +1,4 @@
+
 name: Central Infrastructure Analyst
 
 on:
@@ -12,11 +13,13 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+
       - name: Collect and analyze reports
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,7 +50,6 @@ jobs:
               "Gaming Infrastructure Monitor": "gaming-report"
           }
 
-          problems = []
           missing = []
           server_errors = []
           retry_errors = []
@@ -99,7 +101,6 @@ jobs:
                   missing.append(workflow)
                   continue
 
-              
               download_url = artifact["archive_download_url"]
 
               class SafeRedirect(urllib.request.HTTPRedirectHandler):
@@ -115,7 +116,6 @@ jobs:
               with opener.open(req, timeout=60) as r:
                   archive = zipfile.ZipFile(io.BytesIO(r.read()))
 
-
               for filename in archive.namelist():
                   if not filename.endswith(".txt"):
                       continue
@@ -125,9 +125,9 @@ jobs:
                   )
 
                   print("--- REPORT:", filename, "---")
+
                   for line in report.splitlines():
                       print(line)
-
                       upper = line.upper()
 
                       if "HTTP ERROR 403" in upper or "HTTP 403" in upper:
@@ -145,7 +145,6 @@ jobs:
                                 "ERROR", "NO ADDRESS ASSOCIATED"]):
                           retry_errors.append((workflow, line))
 
-          
           print("\n" + "=" * 60)
           print("CENTRAL ASSESSMENT")
 
@@ -159,26 +158,32 @@ jobs:
           ))
 
           if missing:
+              alert_level = "UNKNOWN"
               print("ALERT LEVEL: UNKNOWN")
               print("Some monitoring reports are unavailable.")
 
           elif affected_modules >= 3:
+              alert_level = "RED"
               print("ALERT LEVEL: RED")
               print("Multiple independent modules report server errors.")
 
           elif affected_modules >= 2:
+              alert_level = "ORANGE"
               print("ALERT LEVEL: ORANGE")
               print("Several monitoring modules report server errors.")
 
           elif server_errors:
+              alert_level = "YELLOW"
               print("ALERT LEVEL: YELLOW")
               print("Server error detected. Further verification required.")
 
           elif retry_errors:
+              alert_level = "YELLOW"
               print("ALERT LEVEL: YELLOW")
               print("Connectivity or DNS issues require rechecking.")
 
           else:
+              alert_level = "GREEN"
               print("ALERT LEVEL: GREEN")
               print("No confirmed infrastructure failures detected.")
 
@@ -191,9 +196,47 @@ jobs:
           print("A successful HTTP response does not guarantee")
           print("that the underlying service is fully operational.")
 
-          # SAVE ANALYSIS HISTORY
+          # ANALYZE HISTORICAL TRENDS
+          history_path = "reports/history.jsonl"
           os.makedirs("reports", exist_ok=True)
 
+          records = []
+
+          if os.path.exists(history_path):
+              with open(history_path, "r", encoding="utf-8") as history:
+                  for line in history:
+                      if line.strip():
+                          try:
+                              records.append(json.loads(line))
+                          except json.JSONDecodeError:
+                              print("WARNING: Invalid history line skipped.")
+
+          print("\n" + "=" * 60)
+          print("HISTORICAL TREND ANALYSIS")
+
+          if records:
+              previous = records[-1]
+
+              previous_errors = previous.get("server_errors", 0)
+              current_errors = len(server_errors)
+
+              print("Previous server errors:", previous_errors)
+              print("Current server errors:", current_errors)
+
+              if current_errors > previous_errors:
+                  print("TREND: DETERIORATING")
+              elif current_errors < previous_errors:
+                  print("TREND: IMPROVING")
+              else:
+                  print("TREND: STABLE")
+
+              print("Previous alert:", previous.get("alert_level", "UNKNOWN"))
+              print("Current alert:", alert_level)
+
+          else:
+              print("Not enough historical data for comparison.")
+
+          # SAVE ANALYSIS HISTORY
           history_record = {
               "timestamp": datetime.datetime.now(
                   datetime.timezone.utc
@@ -202,14 +245,17 @@ jobs:
               "retry_errors": len(retry_errors),
               "access_restrictions": len(info_events),
               "missing_reports": len(missing),
-              "affected_modules": affected_modules
+              "affected_modules": affected_modules,
+              "alert_level": alert_level
           }
 
-          with open("reports/history.jsonl", "a", encoding="utf-8") as history:
+          with open(history_path, "a", encoding="utf-8") as history:
               history.write(json.dumps(history_record) + "\n")
-         
+
           print("HISTORY: New analysis record saved.")
-       PY 
+          print("HISTORY RECORDS:", len(records) + 1)
+          PY
+
       - name: Commit analysis history
         run: |
           git config user.name "github-actions[bot]"
