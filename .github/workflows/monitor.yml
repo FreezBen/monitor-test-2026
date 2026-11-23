@@ -12,42 +12,395 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+
     steps:
       - name: Check critical services
         run: |
           python - <<'PY' | tee report.txt
           import urllib.request
+          import urllib.error
+          import socket
+          import json
+          import time
           import datetime
+          import ssl
 
-          services = {
-              "Cloudflare": "https://www.cloudflarestatus.com/",
-              "AWS": "https://health.aws.amazon.com/health/status",
-              "Google Cloud": "https://status.cloud.google.com/",
-              "Microsoft Azure": "https://status.azure.com/",
-              "GitHub": "https://www.githubstatus.com/",
-              "OpenAI": "https://status.openai.com/",
-              "Google DNS": "https://dns.google/",
+          NOW = datetime.datetime.now(datetime.timezone.utc)
+
+          SERVICES = {
+              "Cloudflare": {
+                  "page": "https://www.cloudflarestatus.com/",
+                  "api": "https://www.cloudflarestatus.com/api/v2/status.json",
+                  "host": "www.cloudflarestatus.com"
+              },
+              "AWS": {
+                  "page": "https://health.aws.amazon.com/health/status",
+                  "host": "health.aws.amazon.com"
+              },
+              "Google Cloud": {
+                  "page": "https://status.cloud.google.com/",
+                  "host": "status.cloud.google.com"
+              },
+              "Microsoft Azure": {
+                  "page": "https://status.azure.com/",
+                  "host": "status.azure.com"
+              },
+              "GitHub": {
+                  "page": "https://www.githubstatus.com/",
+                  "api": "https://www.githubstatus.com/api/v2/status.json",
+                  "host": "www.githubstatus.com"
+              },
+              "OpenAI": {
+                  "page": "https://status.openai.com/",
+                  "api": "https://status.openai.com/api/v2/status.json",
+                  "host": "status.openai.com"
+              },
+              "Google DNS": {
+                  "page": "https://dns.google/",
+                  "host": "dns.google"
+              }
           }
 
-          print("CRITICAL INFRASTRUCTURE MONITOR")
-          print("Time UTC:", datetime.datetime.now(datetime.timezone.utc))
-          print("-" * 55)
+          HEADERS = {
+              "User-Agent": "CriticalInfrastructureMonitor/2.0",
+              "Accept": "application/json,text/html,*/*"
+          }
 
-          for name, url in services.items():
+          results = {}
+          dns_errors = 0
+          retry_errors = 0
+          server_errors = 0
+          failed_providers = set()
+          official_incidents = []
+          affected_modules = set()
+
+          def request_url(url, attempts=2):
+              global retry_errors, server_errors
+
+              last_error = None
+
+              for attempt in range(attempts):
+                  try:
+                      req = urllib.request.Request(
+                          url,
+                          headers=HEADERS
+                      )
+
+                      context = ssl.create_default_context()
+
+                      with urllib.request.urlopen(
+                          req,
+                          timeout=15,
+                          context=context
+                      ) as response:
+
+                          return {
+                              "ok": True,
+                              "code": response.status,
+                              "body": response.read().decode(
+                                  "utf-8", errors="replace"
+                              )
+                          }
+
+                  except urllib.error.HTTPError as error:
+                      if error.code >= 500:
+                          server_errors += 1
+
+                      return {
+                          "ok": False,
+                          "code": error.code,
+                          "error": str(error)
+                      }
+
+                  except Exception as error:
+                      last_error = str(error)
+
+                      if attempt < attempts - 1:
+                          retry_errors += 1
+                          time.sleep(2)
+
+              return {
+                  "ok": False,
+                  "code": None,
+                  "error": last_error
+              }
+
+          print("=" * 65)
+          print("CRITICAL INFRASTRUCTURE MONITOR v2.0")
+          print("UTC:", NOW.isoformat())
+          print("=" * 65)
+
+          # 1. DNS CHECK
+
+          print("\n========== DNS DIAGNOSTICS ==========")
+
+          for name, service in SERVICES.items():
+              host = service["host"]
+
               try:
-                  req = urllib.request.Request(
-                      url,
-                      headers={"User-Agent": "InfrastructureMonitor/1.0"}
+                  socket.getaddrinfo(
+                      host,
+                      443,
+                      type=socket.SOCK_STREAM
                   )
-                  with urllib.request.urlopen(req, timeout=15) as response:
-                      print(f"OK | {name} | HTTP {response.status}")
+
+                  print(f"DNS OK | {name} | {host}")
+
               except Exception as error:
-                  print(f"WARNING | {name} | {error}")
+                  dns_errors += 1
+                  failed_providers.add(name)
+                  affected_modules.add(name)
+
+                  print(
+                      f"DNS ERROR | {name} | "
+                      f"{host} | {error}"
+                  )
+
+          # 2. SERVICE PAGE CHECKS
+
+          print("\n========== HTTP SERVICE CHECKS ==========")
+
+          for name, service in SERVICES.items():
+              result = request_url(service["page"])
+
+              if result["ok"]:
+                  print(
+                      f"PAGE OK | {name} | "
+                      f"HTTP {result['code']}"
+                  )
+
+                  results[name] = {
+                      "page": "OK",
+                      "http_code": result["code"]
+                  }
+
+              else:
+                  code = result["code"]
+
+                  print(
+                      f"PAGE WARNING | {name} | "
+                      f"HTTP {code} | "
+                      f"{result.get('error', '')}"
+                  )
+
+                  results[name] = {
+                      "page": "WARNING",
+                      "http_code": code,
+                      "error": result.get("error")
+                  }
+
+                  failed_providers.add(name)
+                  affected_modules.add(name)
+
+          # 3. OFFICIAL STATUS API CHECKS
+
+          print("\n========== OFFICIAL STATUS APIs ==========")
+
+          for name, service in SERVICES.items():
+              api = service.get("api")
+
+              if not api:
+                  print(
+                      f"STATUS UNKNOWN | {name} | "
+                      "No configured public Status API"
+                  )
+                  continue
+
+              response = request_url(api)
+
+              if not response["ok"]:
+                  print(
+                      f"STATUS API WARNING | {name} | "
+                      f"{response.get('error')}"
+                  )
+
+                  results[name]["official_status"] = "UNKNOWN"
+                  continue
+
+              try:
+                  data = json.loads(response["body"])
+                  status = data.get("status", {})
+                  indicator = status.get(
+                      "indicator", "unknown"
+                  )
+                  description = status.get(
+                      "description", "No description"
+                  )
+
+                  results[name]["official_status"] = indicator
+                  results[name]["status_description"] = description
+
+                  print(
+                      f"OFFICIAL STATUS | {name} | "
+                      f"{indicator} | {description}"
+                  )
+
+                  if indicator in (
+                      "minor",
+                      "major",
+                      "critical",
+                      "maintenance"
+                  ):
+                      affected_modules.add(name)
+                      official_incidents.append({
+                          "provider": name,
+                          "indicator": indicator,
+                          "description": description
+                      })
+
+                      if indicator in (
+                          "major",
+                          "critical"
+                      ):
+                          failed_providers.add(name)
+
+              except Exception as error:
+                  results[name]["official_status"] = "UNKNOWN"
+
+                  print(
+                      f"STATUS PARSE WARNING | "
+                      f"{name} | {error}"
+                  )
+
+          # 4. ALERT CLASSIFICATION
+
+          critical_incidents = [
+              item for item in official_incidents
+              if item["indicator"] in ("major", "critical")
+          ]
+
+          minor_incidents = [
+              item for item in official_incidents
+              if item["indicator"] in ("minor", "maintenance")
+          ]
+
+          if critical_incidents:
+              alert_level = "RED"
+              conclusion = (
+                  "Official provider status reports a major "
+                  "or critical incident."
+              )
+
+          elif (
+              dns_errors >= 2
+              or server_errors >= 2
+          ):
+              alert_level = "HIGH"
+              conclusion = (
+                  "Multiple infrastructure checks failed."
+              )
+
+          elif (
+              dns_errors > 0
+              or server_errors > 0
+              or failed_providers
+              or minor_incidents
+          ):
+              alert_level = "WARNING"
+              conclusion = (
+                  "One or more checks require investigation."
+              )
+
+          else:
+              alert_level = "GREEN"
+              conclusion = (
+                  "All configured checks completed successfully."
+              )
+
+          # 5. FINAL REPORT
+
+          print("\n========== SUMMARY ==========")
+
+          print("Alert level:", alert_level)
+          print("Conclusion:", conclusion)
+          print("Server errors:", server_errors)
+          print("Retry errors:", retry_errors)
+          print("DNS errors:", dns_errors)
+          print("Affected modules:", len(affected_modules))
+          print("Failed providers:", len(failed_providers))
+
+          print(
+              "Failed provider list:",
+              ", ".join(sorted(failed_providers))
+              if failed_providers else "None"
+          )
+
+          print("\n========== OFFICIAL INCIDENTS ==========")
+
+          if official_incidents:
+              for incident in official_incidents:
+                  print(
+                      incident["provider"],
+                      "|",
+                      incident["indicator"],
+                      "|",
+                      incident["description"]
+                  )
+          else:
+              print("No reported incidents from checked Status APIs.")
+
+          print("\n========== SERVICE DETAILS ==========")
+
+          for name, result in results.items():
+              print(name, "|", json.dumps(result, ensure_ascii=False))
+
+          print("\n========== IMPORTANT LIMITATIONS ==========")
+          print(
+              "HTTP success does not prove that the provider's "
+              "entire infrastructure is operational."
+          )
+          print(
+              "DNS checks test the GitHub runner's resolver, "
+              "not every DNS provider worldwide."
+          )
+          print(
+              "Only configured official Status APIs can provide "
+              "provider-reported incident status."
+          )
+          print(
+              "AWS, Google Cloud and Azure are currently checked "
+              "for page availability only."
+          )
+          print(
+              "No incident does not mean that every service is healthy."
+          )
+
+          print("\nReport completed:", datetime.datetime.now(
+              datetime.timezone.utc
+          ).isoformat())
+
+          # 6. MACHINE-READABLE REPORT
+
+          report = {
+              "time_utc": NOW.isoformat(),
+              "alert_level": alert_level,
+              "conclusion": conclusion,
+              "server_errors": server_errors,
+              "retry_errors": retry_errors,
+              "dns_errors": dns_errors,
+              "affected_modules": len(affected_modules),
+              "failed_providers": sorted(failed_providers),
+              "official_incidents": official_incidents,
+              "services": results
+          }
+
+          with open("report.json", "w", encoding="utf-8") as file:
+              json.dump(
+                  report,
+                  file,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
           PY
 
-      - name: Save monitoring report
+      - name: Save monitoring reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: monitor-report
-          path: report.txt
+          path: |
+            report.txt
+            report.json
           retention-days: 7
